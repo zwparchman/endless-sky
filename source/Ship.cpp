@@ -1357,7 +1357,6 @@ void Ship::Launch(list<shared_ptr<Ship>> &ships)
 					ship->AddOutfit(outfit, neededAmmo);
 				}
 			}
-			
 			// This ship will refuel naturally based on the carrier's fuel collection,
 			// but the carrier may have reserves to spare.
 			if(ship->Attributes().Get("fuel capacity") && fuel > JumpFuel())
