@@ -210,6 +210,8 @@ void Ship::Load(const DataNode &node)
 			zoom = 0.;
 			landingPlanet = GameData::Planets().Get(child.Token(1));
 		}
+		else if(child.Token(0) == "destination system" && child.Size() >= 2)
+			targetSystem = GameData::Systems().Get(child.Token(1));
 		else if(child.Token(0) == "parked")
 			isParked = true;
 		else if(child.Token(0) == "description" && child.Size() >= 2)
@@ -467,6 +469,8 @@ void Ship::Save(DataWriter &out) const
 		}
 		if(landingPlanet)
 			out.Write("planet", landingPlanet->Name());
+		if(targetSystem && !targetSystem->Name().empty())
+			out.Write("destination system", targetSystem->Name());
 		if(isParked)
 			out.Write("parked");
 	}
@@ -486,7 +490,6 @@ const string &Ship::ModelName() const
 {
 	return modelName;
 }
-
 
 
 
@@ -581,7 +584,6 @@ void Ship::SetPlanet(const Planet *planet)
 	// Escorts should take off a bit behind their flagships.
 	zoom = !planet;
 	landingPlanet = planet;
-	SetDestination(nullptr);
 }
 
 
@@ -650,7 +652,7 @@ void Ship::SetPersonality(const Personality &other)
 	if(personality.IsDerelict())
 	{
 		shields = 0.;
-		hull = .5 * MinimumHull();
+		hull = min(hull, .5 * MinimumHull());
 		isDisabled = true;
 	}
 }
@@ -866,6 +868,9 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 	}
 	else if(hyperspaceSystem || hyperspaceCount)
 	{
+		// Don't apply external acceleration while jumping.
+		acceleration = Point();
+		
 		fuel -= (hyperspaceSystem != nullptr) * hyperspaceType * .01;
 		
 		// Enter hyperspace.
@@ -885,24 +890,36 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 		{
 			currentSystem = hyperspaceSystem;
 			hyperspaceSystem = nullptr;
-			SetTargetSystem(nullptr);
-			SetTargetPlanet(nullptr);
+			targetSystem = nullptr;
+			// Check if the target planet is in the destination system or not.
+			const Planet *planet = (targetPlanet ? targetPlanet->GetPlanet() : nullptr);
+			if(!planet || planet->GetSystem() != currentSystem)
+				targetPlanet = nullptr;
+			// Check if your parent has a target planet in this system.
+			shared_ptr<Ship> parent = GetParent();
+			if(!targetPlanet && parent && parent->targetPlanet)
+			{
+				planet = parent->targetPlanet->GetPlanet();
+				if(planet && planet->GetSystem() == currentSystem)
+					targetPlanet = parent->targetPlanet;
+			}
 			direction = -1;
 			
+			// If you have a target planet in the destination system, exit
+			// hyperpace aimed at it. Otherwise, target the first planet that
+			// has a spaceport.
 			Point target;
-			for(const StellarObject &object : currentSystem->Objects())
-				if(object.GetPlanet() && object.GetPlanet()->HasSpaceport())
-				{
-					target = object.Position();
-					break;
-				}
-			if(GetDestination())
+			if(targetPlanet)
+				target = targetPlanet->Position();
+			else
+			{
 				for(const StellarObject &object : currentSystem->Objects())
-					if(object.GetPlanet() == GetDestination())
+					if(object.GetPlanet() && object.GetPlanet()->HasSpaceport())
 					{
 						target = object.Position();
 						break;
 					}
+			}
 			
 			if(hasJumpDrive)
 			{
@@ -962,6 +979,9 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 	}
 	else if(landingPlanet || zoom < 1.)
 	{
+		// Don't apply external acceleration while landing.
+		acceleration = Point();
+		
 		// If a ship was disabled at the very moment it began landing, do not
 		// allow it to continue landing.
 		if(isDisabled)
@@ -1053,7 +1073,6 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 	else if(!pilotError)
 	{
 		double thrustCommand = commands.Has(Command::FORWARD) - commands.Has(Command::BACK);
-		Point acceleration;
 		if(thrustCommand)
 		{
 			// Check if we are able to apply this thrust.
@@ -1105,36 +1124,6 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 					}
 			}
 		}
-		if(acceleration)
-		{
-			acceleration *= slowMultiplier;
-			Point dragAcceleration = acceleration - velocity * (attributes.Get("drag") / mass);
-			// Make sure dragAcceleration has nonzero length, to avoid divide by zero.
-			if(dragAcceleration)
-			{
-				// What direction will the net acceleration be if this drag is applied?
-				// If the net acceleration will be opposite the thrust, do not apply drag.
-				dragAcceleration *= .5 * (acceleration.Unit().Dot(dragAcceleration.Unit()) + 1.);
-				
-				// A ship can only "cheat" to stop if it is moving slow enough that
-				// it could stop completely this frame. This is to avoid overshooting
-				// when trying to stop and ending up headed in the other direction.
-				if(commands.Has(Command::STOP))
-				{
-					// How much acceleration would it take to come to a stop in the
-					// direction normal to the ship's current facing? This is only
-					// possible if the acceleration plus drag vector is in the
-					// opposite direction from the velocity vector when both are
-					// projected onto the current facing vector, and the acceleration
-					// vector is the larger of the two.
-					double vNormal = velocity.Dot(angle.Unit());
-					double aNormal = dragAcceleration.Dot(angle.Unit());
-					if((aNormal > 0.) != (vNormal > 0.) && fabs(aNormal) > fabs(vNormal))
-						dragAcceleration = -vNormal * angle.Unit();
-				}
-				velocity += dragAcceleration;
-			}
-		}
 		if(commands.Turn())
 		{
 			// Check if we are able to turn.
@@ -1148,6 +1137,37 @@ bool Ship::Move(list<Effect> &effects, list<shared_ptr<Flotsam>> &flotsam)
 				angle += commands.Turn() * TurnRate() * slowMultiplier;
 			}
 		}
+	}
+	if(acceleration)
+	{
+		acceleration *= slowMultiplier;
+		Point dragAcceleration = acceleration - velocity * (attributes.Get("drag") / mass);
+		// Make sure dragAcceleration has nonzero length, to avoid divide by zero.
+		if(dragAcceleration)
+		{
+			// What direction will the net acceleration be if this drag is applied?
+			// If the net acceleration will be opposite the thrust, do not apply drag.
+			dragAcceleration *= .5 * (acceleration.Unit().Dot(dragAcceleration.Unit()) + 1.);
+			
+			// A ship can only "cheat" to stop if it is moving slow enough that
+			// it could stop completely this frame. This is to avoid overshooting
+			// when trying to stop and ending up headed in the other direction.
+			if(commands.Has(Command::STOP))
+			{
+				// How much acceleration would it take to come to a stop in the
+				// direction normal to the ship's current facing? This is only
+				// possible if the acceleration plus drag vector is in the
+				// opposite direction from the velocity vector when both are
+				// projected onto the current facing vector, and the acceleration
+				// vector is the larger of the two.
+				double vNormal = velocity.Dot(angle.Unit());
+				double aNormal = dragAcceleration.Dot(angle.Unit());
+				if((aNormal > 0.) != (vNormal > 0.) && fabs(aNormal) > fabs(vNormal))
+					dragAcceleration = -vNormal * angle.Unit();
+			}
+			velocity += dragAcceleration;
+		}
+		acceleration = Point();
 	}
 	
 	// Boarding:
@@ -1416,8 +1436,12 @@ int Ship::Scan()
 	// Whenever not actively scanning, the amount of scan information the ship
 	// has "decays" over time. For a scanner with a speed of 1, one second of
 	// uninterrupted scanning is required to successfully scan its target.
-	cargoScan = max(0., cargoScan - 1.);
-	outfitScan = max(0., outfitScan - 1.);
+	// Only apply the decay if not already done scanning the target.
+	static const double SCAN_TIME = 60.;
+	if(cargoScan < SCAN_TIME)
+		cargoScan = max(0., cargoScan - 1.);
+	if(outfitScan < SCAN_TIME)
+		outfitScan = max(0., outfitScan - 1.);
 	if(!commands.Has(Command::SCAN) || CannotAct())
 		return 0;
 	
@@ -1444,27 +1468,23 @@ int Ship::Scan()
 	if(!outfitSpeed)
 		outfitSpeed = 1.;
 	
-	// Play the scanning sound if the actor or the target is the player's ship.
-	if(government->IsPlayer() || target->GetGovernment()->IsPlayer())
-		Audio::Play(Audio::Get("scan"), Position());
-	
 	// Check how close this ship is to the target it is trying to scan.
 	double distance = (target->position - position).Length();
 	
 	// Check if either scanner has finished scanning.
 	bool startedScanning = false;
+	bool activeScanning = false;
 	int result = 0;
-	static const double SCAN_TIME = 60.;
 	if(cargoScan < SCAN_TIME)
 	{
 		if(distance < cargoDistance)
 		{
 			startedScanning |= !cargoScan;
-			cargoScan += cargoSpeed;
+			activeScanning = true;
+			// To make up for the scan decay above:
+			cargoScan += cargoSpeed + 1.;
 			if(cargoScan >= SCAN_TIME)
 				result |= ShipEvent::SCAN_CARGO;
-			// To make up for the scan decay above:
-			cargoScan += 1.;
 		}
 	}
 	if(outfitScan < SCAN_TIME)
@@ -1472,18 +1492,34 @@ int Ship::Scan()
 		if(distance < outfitDistance)
 		{
 			startedScanning |= !outfitScan;
-			outfitScan += outfitSpeed;
+			activeScanning = true;
+			// To make up for the scan decay above:
+			outfitScan += outfitSpeed + 1.;
 			if(outfitScan >= SCAN_TIME)
 				result |= ShipEvent::SCAN_OUTFITS;
-			// To make up for the scan decay above:
-			outfitScan += 1.;
 		}
 	}
+	
+	// Play the scanning sound if the actor or the target is the player's ship.
+	if(government->IsPlayer() || (target->GetGovernment()->IsPlayer() && activeScanning))
+		Audio::Play(Audio::Get("scan"), Position());
+	
 	if(startedScanning && government->IsPlayer())
-		Messages::Add("Attempting to scan the ship \"" + target->Name() + "\".");
+		Messages::Add("Attempting to scan the ship \"" + target->Name() + "\".", false);
 	else if(startedScanning && target->GetGovernment()->IsPlayer())
 		Messages::Add("The " + government->GetName() + " ship \""
-			+ Name() + "\" is attempting to scan you.");
+			+ Name() + "\" is attempting to scan you.", false);
+	
+	if(target->GetGovernment()->IsPlayer() && (result & ShipEvent::SCAN_CARGO))
+	{
+		Messages::Add("The " + government->GetName() + " ship \""
+			+ Name() + "\" succeeded in scanning your cargo.");
+	}
+	if(target->GetGovernment()->IsPlayer() && (result & ShipEvent::SCAN_OUTFITS))
+	{
+		Messages::Add("The " + government->GetName() + " ship \""
+			+ Name() + "\" succeeded in scanning your outfits.");
+	}
 	
 	return result;
 }
@@ -1646,11 +1682,19 @@ double Ship::Cloaking() const
 
 
 
-bool Ship::IsEnteringHyperspace() const
+// Get the system that the ship is currently jumping to. This returns null
+// if the ship has already jumped, i.e. it is leaving hyperspace.
+const System *Ship::HyperspaceSystem() const
 {
 	return hyperspaceSystem;
 }
 
+
+
+bool Ship::IsEnteringHyperspace() const
+{
+	return hyperspaceSystem;
+}
 
 
 
@@ -1866,7 +1910,6 @@ void Ship::WasCaptured(const shared_ptr<Ship> &capturer)
 	commands.Clear();
 	isDisabled = false;
 	hyperspaceSystem = nullptr;
-	destination = nullptr;
 	landingPlanet = nullptr;
 	
 	isSpecial = capturer->isSpecial;
@@ -2053,7 +2096,7 @@ int Ship::TakeDamage(const Projectile &projectile, bool isBlast)
     combatCounter = 60 * 5; //5 seconds of frames
 
 	
-	if(hitForce && !IsHyperspacing())
+	if(hitForce)
 	{
 		Point d = position - projectile.Position();
 		double distance = d.Length();
@@ -2088,7 +2131,7 @@ void Ship::ApplyForce(const Point &force)
 	if(!currentMass)
 		return;
 	
-	velocity += force / currentMass;
+	acceleration += force / currentMass;
 }
 
 
@@ -2215,7 +2258,6 @@ CargoHold &Ship::Cargo()
 
 
 
-
 const CargoHold &Ship::Cargo() const
 {
 	return cargo;
@@ -2267,7 +2309,6 @@ const Outfit &Ship::Attributes() const
 {
 	return attributes;
 }
-
 
 
 
@@ -2406,13 +2447,6 @@ const System *Ship::GetTargetSystem() const
 
 
 
-const Planet *Ship::GetDestination() const
-{
-	return destination;
-}
-
-
-
 // Mining target.
 shared_ptr<Minable> Ship::GetTargetAsteroid() const
 {
@@ -2431,10 +2465,13 @@ shared_ptr<Flotsam> Ship::GetTargetFlotsam() const
 // Set this ship's targets.
 void Ship::SetTargetShip(const shared_ptr<Ship> &ship)
 {
-	targetShip = ship;
-	// When you change targets, clear your scanning records.
-	cargoScan = 0.;
-	outfitScan = 0.;
+	if(ship != targetShip.lock())
+	{
+		targetShip = ship;
+		// When you change targets, clear your scanning records.
+		cargoScan = 0.;
+		outfitScan = 0.;
+	}
 }
 
 
@@ -2446,23 +2483,16 @@ void Ship::SetShipToAssist(const shared_ptr<Ship> &ship)
 
 
 
-
 void Ship::SetTargetPlanet(const StellarObject *object)
 {
 	targetPlanet = object;
 }
 
 
+
 void Ship::SetTargetSystem(const System *system)
 {
 	targetSystem = system;
-}
-
-
-
-void Ship::SetDestination(const Planet *planet)
-{
-	destination = planet;
 }
 
 

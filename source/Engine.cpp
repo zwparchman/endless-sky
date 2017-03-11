@@ -25,6 +25,7 @@ PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 #include "MapPanel.h"
 #include "Mask.h"
 #include "Messages.h"
+#include "OutlineShader.h"
 #include "Person.h"
 #include "Planet.h"
 #include "PlayerInfo.h"
@@ -34,6 +35,7 @@ PARTICULAR PURPOSE.  See the GNU General Public License for more details.
 #include "Random.h"
 #include "RingShader.h"
 #include "Screen.h"
+#include "Sprite.h"
 #include "SpriteSet.h"
 #include "SpriteShader.h"
 #include "StarField.h"
@@ -315,12 +317,24 @@ void Engine::Step(bool isActive)
 	Audio::Update(center);
 	
 	// Smoothly zoom in and out.
-	double zoomTarget = Preferences::ViewZoom();
-	if(zoom < zoomTarget)
-		zoom = min(zoomTarget, zoom * 1.01);
-	else if(zoom > zoomTarget)
-		zoom = max(zoomTarget, zoom * .99);
-	
+	if(isActive)
+	{
+		double zoomTarget = Preferences::ViewZoom();
+		if(zoom < zoomTarget)
+			zoom = min(zoomTarget, zoom * 1.01);
+		else if(zoom > zoomTarget)
+			zoom = max(zoomTarget, zoom * .99);
+	}
+		
+	// Draw a highlight to distinguish the flagship from other ships.
+	if(flagship && Preferences::Has("Highlight player's flagship"))
+	{
+		highlightSprite = flagship->GetSprite();
+		highlightUnit = flagship->Unit() * zoom;
+	}
+	else
+		highlightSprite = nullptr;
+		
 	// Any of the player's ships that are in system are assumed to have
 	// landed along with the player.
 	if(flagship && flagship->GetPlanet() && isActive)
@@ -572,7 +586,7 @@ void Engine::Step(bool isActive)
 	{
 		shared_ptr<Ship> ship = selected.lock();
 		if(ship && ship != target && !ship->IsParked() && ship->GetSystem() == player.GetSystem()
-				&& !ship->IsDestroyed())
+				&& !ship->IsDestroyed() && ship->Zoom() > 0.)
 		{
 			double size = (ship->Width() + ship->Height()) * .35;
 			targets.push_back({
@@ -631,6 +645,15 @@ void Engine::Draw() const
 		RingShader::Draw(it.position * zoom, it.radius * zoom + 3., 1.5, it.shields, color[it.isEnemy]);
 		double dashes = 20. * min(1., zoom);
 		RingShader::Draw(it.position * zoom, it.radius * zoom, 1.5, it.hull, color[2 + it.isEnemy], dashes);
+	}
+	
+	// Draw the flagship highlight, if any.
+	if(highlightSprite)
+	{
+		Point size(highlightSprite->Width(), highlightSprite->Height());
+		Color color(.5, .8, .2, 0.);
+		// The flagship is always in the dead center of the screen.
+		OutlineShader::Draw(highlightSprite, Point(), size, color, highlightUnit);
 	}
 	
 	if(flash)
@@ -829,23 +852,25 @@ void Engine::EnterSystem()
 	{
 		// Find out how attractive the player's fleet is to pirates. Aside from a
 		// heavy freighter, no single ship should attract extra pirate attention.
-		unsigned attraction = 0;
+		double weapon_mass=0.0;
+		double cargo_capacity=0.0;
 		for(const shared_ptr<Ship> &ship : player.Ships())
 		{
 			if(ship->IsParked())
 				continue;
-		
-			const string &category = ship->Attributes().Category();
-			if(category == "Light Freighter")
-				attraction += 1;
-			if(category == "Heavy Freighter")
-				attraction += 2;
+			cargo_capacity += ship->Attributes().Get("cargo space");
+			weapon_mass += ship->GetArmament().WeaponSpaceUsed();
 		}
-		if(attraction > 2)
-		{
-			for(int i = 0; i < 10; ++i)
-				if(Random::Int(200) + 1 < attraction)
-					raidFleet->Place(*system, ships);
+
+        double mod_cargo = 9*pow(cargo_capacity, 0.89);
+        double mod_weapon=0.9 * pow(weapon_mass, 1.2);
+		long int  attraction = (mod_cargo - mod_weapon) * 25000;
+		printf("wep: %f, cargo: %f att: %li\n",mod_weapon, mod_cargo, attraction);
+		while(attraction > raidFleet->Strength()){
+			attraction -= raidFleet->Strength();
+            attraction *= 0.99;
+			printf("fleet strength %li att left %li\n",raidFleet->Strength(), attraction);
+			raidFleet->Place(*system, ships);
 		}
 	}
 	
@@ -857,15 +882,8 @@ void Engine::EnterSystem()
 	// since the new player ships can make at most four jumps before landing.
 	if(today <= Date(21, 11, 3013))
 	{
-		Messages::Add(string("Press \"")
-			+ Command::MAP.KeyName()
-			+ string("\" to view your map, and \"")
-			+ Command::JUMP.KeyName()
-			+ string("\" to make a hyperspace jump."));
-		Messages::Add(string("Or, press \"")
-			+ Command::LAND.KeyName()
-			+ string("\" to land. For the main menu, press \"")
-			+ Command::MENU.KeyName() + string("\"."));
+		Messages::Add(GameData::HelpMessage("basics 1"));
+		Messages::Add(GameData::HelpMessage("basics 2"));
 	}
 }
 
@@ -938,7 +956,9 @@ void Engine::CalculateStep()
 		}
 		else
 		{
-			if(&**it != flagship)
+			// Check if we need to play sounds for a ship jumping in or out of
+			// the system. Make no sound if it entered via wormhole.
+			if(&**it != flagship && (*it)->Zoom() == 1.)
 			{
 				// Did this ship just begin hyperspacing?
 				if(wasHere && !wasHyperspacing && (*it)->IsHyperspacing())
@@ -1006,7 +1026,7 @@ void Engine::CalculateStep()
 		newCenter = flagship->Position();
 		newCenterVelocity = flagship->Velocity();
 	}
-	bool checkClicks = doClick;
+	bool checkClicks = (flagship && doClick);
 	
 	draw[calcTickTock].SetCenter(newCenter, newCenterVelocity);
 	radar[calcTickTock].SetCenter(newCenter);
