@@ -54,7 +54,7 @@ class System;
 // universe.
 class GameData {
 public:
-	static void BeginLoad(const char * const *argv);
+	static int BeginLoad(const char * const *argv);
 	static void LoadShaders();
 	static double Progress();
 	// Begin loading a sprite that was previously deferred. Currently this is

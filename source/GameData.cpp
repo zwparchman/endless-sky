@@ -115,11 +115,12 @@ namespace {
 
 
 
-void GameData::BeginLoad(const char * const *argv)
+int GameData::BeginLoad(const char * const *argv)
 {
 	bool printShips = false;
 	bool printWeapons = false;
 	bool debugMode = false;
+    bool quitAfter = false;
 	for(const char * const *it = argv + 1; *it; ++it)
 	{
 		if((*it)[0] == '-')
@@ -131,6 +132,8 @@ void GameData::BeginLoad(const char * const *argv)
 				printWeapons = true;
 			if(arg == "-d" || arg == "--debug")
 				debugMode = true;
+            if(arg == "-q" || arg == "--quit")
+                quitAfter=true;
 			continue;
 		}
 	}
@@ -192,6 +195,8 @@ void GameData::BeginLoad(const char * const *argv)
 		PrintShipTable();
 	if(printWeapons)
 		PrintWeaponTable();
+
+    return quitAfter;
 }
 
 
