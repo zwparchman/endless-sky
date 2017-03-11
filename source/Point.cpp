@@ -292,10 +292,9 @@ Point Point::Unit() const
 	b = _mm_sqrt_pd(b);
 	return Point(v / b);
 #else
-	double b = x * x + y * y;
-	if(!b)
-		return Point(1., 0.);
-	b = 1. / sqrt(b);
+	if(!x && !y)
+		return Point(0,1);
+	double b = 1. / sqrt(x * x + y * y);
 	return Point(x * b, y * b);
 #endif
 }
