@@ -2753,6 +2753,47 @@ double Ship::MinimumHull() const
 
 
 
+// Return an ordered vector of bay indexes that indicates which Bay should
+// receive the ship's excess shield genereation, hull repair, or fuel, to
+// facilitate a parallel repair strategy. The second value is the carried
+// ship's need for the stated Purpose.
+vector<pair<size_t, double>> Ship::BayOrder(SortBy reason) const
+{
+	vector<pair<size_t, double>> result;
+	if(reason == SHIELDS)
+	{
+		for(size_t i = 0; i < bays.size(); ++i)
+			if(bays[i].ship)
+				result.emplace_back(i,
+					max(0., bays[i].ship->Attributes().Get("shields") - bays[i].ship->shields));
+	}
+	else if(reason == HULL)
+	{
+		for(size_t i = 0; i < bays.size(); ++i)
+			if(bays[i].ship)
+				result.emplace_back(i,
+					max(0., bays[i].ship->Attributes().Get("hull") - bays[i].ship->hull));
+	}
+	else if(reason == FUEL)
+	{
+		for(size_t i = 0; i < bays.size(); ++i)
+			if(bays[i].ship)
+				result.emplace_back(i,
+					max(0., bays[i].ship->Attributes().Get("fuel capacity") - bays[i].ship->fuel));
+	}
+	// Sort from most need to least need.
+	if(result.size() > 1)
+		sort(result.begin(), result.end(),
+			[] (const pair<size_t, double> &lhs, const pair<size_t, double> &rhs)
+			{
+				return lhs.second > rhs.second;
+			}
+		);
+	return result;
+}
+
+
+
 // Add to this ship's hull or shields, and return the amount added. If the
 // ship is carrying fighters, add to them as well.
 double Ship::AddFuel(double rate)
@@ -2765,17 +2806,17 @@ double Ship::AddFuel(double rate)
 	
 	if(rate > 0.)
 	{
-		for(Bay &bay : bays)
+		// Obtain the occupied bays, ordered from most to least need,
+		// and their ship's fuel need (max - current).
+		const vector<pair<size_t, double>> order = BayOrder(FUEL);
+		for(const pair<size_t, double> &index : order)
 		{
-			if(!bay.ship)
-				continue;
-			
 			// Carried ships do not collect fuel from ramscoops.
-			double myMax = bay.ship->Attributes().Get("fuel capacity");
-			if(rate > 0. && bay.ship->fuel < myMax)
+			double need = index.second;
+			if(rate > 0. && need > 0.)
 			{
-				double extra = min(myMax - bay.ship->fuel, rate);
-				bay.ship->fuel += extra;
+				double extra = min(need, rate);
+				bays[index.first].ship->fuel += extra;
 				rate -= extra;
 				added += extra;
 			}
@@ -2798,61 +2839,66 @@ double Ship::AddFuel(double rate)
 
 
 
+// Increase this ship's hull, and the hull of any ships being carried. Carried
+// ships would otherwise not utilize their natural hull repair.
 double Ship::AddHull(double rate)
 {
 	double added = min(rate, attributes.Get("hull") - hull);
 	hull += added;
 	rate -= added;
 	
-	if(rate > 0.)
-		for(Bay &bay : bays)
+	// Obtain the occupied bays, ordered from most to least need, and their
+	// ship's hull repair need (max hull - current).
+	vector<pair<size_t, double>> order = BayOrder(HULL);
+	for(pair<size_t, double> &index : order)
+	{
+		Bay &bay = bays[index.first];
+		double &need = index.second;
+		// Apply native hull repair of the carried ship.
+		double myGen = bay.ship->Attributes().Get("hull repair rate");
+		bay.ship->hull += min(need, myGen);
+		need = max(0., need - myGen);
+		// Apply excess repair capacity from this ship.
+		if(rate > 0. && need > 0.)
 		{
-			if(!bay.ship)
-				continue;
-			
-			double myGen = bay.ship->Attributes().Get("hull repair rate");
-			double myMax = bay.ship->Attributes().Get("hull");
-			bay.ship->hull = min(myMax, bay.ship->hull + myGen);
-			if(rate > 0. && bay.ship->hull < myMax)
-			{
-				double extra = min(myMax - bay.ship->hull, rate);
-				bay.ship->hull += extra;
-				rate -= extra;
-				added += extra;
-			}
-			else if(rate <= 0.)
-				break;
+			double extra = min(need, rate);
+			bay.ship->hull += extra;
+			rate -= extra;
+			added += extra;
 		}
+	}
 	return added;
 }
 
 
 
+// Increase this ship's shields, and the shields of any ships being carried.
+// Carried ships would otherwise not utilize their natural shield generation.
 double Ship::AddShields(double rate)
 {
 	double added = min(rate, attributes.Get("shields") - shields);
 	shields += added;
 	rate -= added;
 	
-	if(rate > 0.)
-		for(Bay &bay : bays)
+	// Obtain the occupied bays, ordered from most to least need, and their
+	// ship's shield recharge need (max shields - current).
+	vector<pair<size_t, double>> order = BayOrder(SHIELDS);
+	for(pair<size_t, double> &index : order)
+	{
+		Bay &bay = bays[index.first];
+		double &need = index.second;
+		// Apply native shield regeneration of the carried ship.
+		double myGen = bay.ship->Attributes().Get("shield generation");
+		bay.ship->shields += min(need, myGen);
+		need = max(0., need - myGen);
+		if(rate > 0. && need > 0.)
 		{
-			if(!bay.ship)
-				continue;
-			
-			double myGen = bay.ship->Attributes().Get("shield generation");
-			double myMax = bay.ship->Attributes().Get("shields");
-			bay.ship->shields = min(myMax, bay.ship->shields + myGen);
-			if(rate > 0. && bay.ship->shields < myMax)
-			{
-				double extra = min(myMax - bay.ship->shields, rate);
-				bay.ship->shields += extra;
-				rate -= extra;
-				added += extra;
-			}
-			else if(rate <= 0.)
-				break;
+			double extra = min(need, rate);
+			bay.ship->shields += extra;
+			rate -= extra;
+			added += extra;
 		}
+	}
 	return added;
 }
 

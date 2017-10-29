@@ -357,6 +357,8 @@ private:
 	double MinimumHull() const;
 	// Add to this ship's fuel, hull, or shields, and return the amount added. If the
 	// ship is carrying fighters, add to them as well.
+	enum SortBy {SHIELDS, HULL, FUEL};
+	std::vector<std::pair<size_t, double>> BayOrder(SortBy reason) const;
 	double AddFuel(double rate);
 	double AddHull(double rate);
 	double AddShields(double rate);
