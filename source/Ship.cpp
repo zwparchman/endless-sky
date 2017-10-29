@@ -2758,34 +2758,40 @@ double Ship::MinimumHull() const
 double Ship::AddFuel(double rate)
 {
 	// Restore this ship's fuel until it has 1 jump's worth.
-	double added = min(rate, JumpFuel() - fuel);
+	double toReserve = JumpFuel(targetSystem) - fuel;
+	double added = ((toReserve > 0.) ? min(rate, toReserve) : 0.);
 	fuel += added;
 	rate -= added;
 	
-	for(Bay &bay : bays)
-	{
-		if(!bay.ship)
-			continue;
-		
-		// Carried ships cannot collect fuel from any ramscoops they may have installed.
-		double myMax = bay.ship->Attributes().Get("fuel capacity");
-		if(rate > 0. && bay.ship->fuel < myMax)
-		{
-			double extra = min(myMax - bay.ship->fuel, rate);
-			bay.ship->fuel += extra;
-			rate -= extra;
-			added += extra;
-		}
-		else if(rate <= 0.)
-			break;
-	}
-	
-	// All carried ships have reached their fuel capacity, so divert all fuel into reserves.
 	if(rate > 0.)
 	{
-		double extra = min(Attributes().Get("fuel capacity") - fuel, rate);
-		fuel += extra;
-		added += extra;
+		for(Bay &bay : bays)
+		{
+			if(!bay.ship)
+				continue;
+			
+			// Carried ships do not collect fuel from ramscoops.
+			double myMax = bay.ship->Attributes().Get("fuel capacity");
+			if(rate > 0. && bay.ship->fuel < myMax)
+			{
+				double extra = min(myMax - bay.ship->fuel, rate);
+				bay.ship->fuel += extra;
+				rate -= extra;
+				added += extra;
+			}
+			else if(rate <= 0.)
+				break;
+		}
+		
+		// All carried ships have reached their fuel capacity: divert
+		// remaining collected fuel into reserves.
+		if(rate > 0.)
+		{
+			// Do not exceed this ship's maximum fuel capacity.
+			double extra = min(attributes.Get("fuel capacity") - fuel, rate);
+			fuel += extra;
+			added += extra;
+		}
 	}
 	return added;
 }
@@ -2798,24 +2804,25 @@ double Ship::AddHull(double rate)
 	hull += added;
 	rate -= added;
 	
-	for(Bay &bay : bays)
-	{
-		if(!bay.ship)
-			continue;
-		
-		double myGen = bay.ship->Attributes().Get("hull repair rate");
-		double myMax = bay.ship->Attributes().Get("hull");
-		bay.ship->hull = min(myMax, bay.ship->hull + myGen);
-		if(rate > 0. && bay.ship->hull < myMax)
+	if(rate > 0.)
+		for(Bay &bay : bays)
 		{
-			double extra = min(myMax - bay.ship->hull, rate);
-			bay.ship->hull += extra;
-			rate -= extra;
-			added += extra;
+			if(!bay.ship)
+				continue;
+			
+			double myGen = bay.ship->Attributes().Get("hull repair rate");
+			double myMax = bay.ship->Attributes().Get("hull");
+			bay.ship->hull = min(myMax, bay.ship->hull + myGen);
+			if(rate > 0. && bay.ship->hull < myMax)
+			{
+				double extra = min(myMax - bay.ship->hull, rate);
+				bay.ship->hull += extra;
+				rate -= extra;
+				added += extra;
+			}
+			else if(rate <= 0.)
+				break;
 		}
-		else if(rate <= 0.)
-			break;
-	}
 	return added;
 }
 
@@ -2827,24 +2834,25 @@ double Ship::AddShields(double rate)
 	shields += added;
 	rate -= added;
 	
-	for(Bay &bay : bays)
-	{
-		if(!bay.ship)
-			continue;
-		
-		double myGen = bay.ship->Attributes().Get("shield generation");
-		double myMax = bay.ship->Attributes().Get("shields");
-		bay.ship->shields = min(myMax, bay.ship->shields + myGen);
-		if(rate > 0. && bay.ship->shields < myMax)
+	if(rate > 0.)
+		for(Bay &bay : bays)
 		{
-			double extra = min(myMax - bay.ship->shields, rate);
-			bay.ship->shields += extra;
-			rate -= extra;
-			added += extra;
+			if(!bay.ship)
+				continue;
+			
+			double myGen = bay.ship->Attributes().Get("shield generation");
+			double myMax = bay.ship->Attributes().Get("shields");
+			bay.ship->shields = min(myMax, bay.ship->shields + myGen);
+			if(rate > 0. && bay.ship->shields < myMax)
+			{
+				double extra = min(myMax - bay.ship->shields, rate);
+				bay.ship->shields += extra;
+				rate -= extra;
+				added += extra;
+			}
+			else if(rate <= 0.)
+				break;
 		}
-		else if(rate <= 0.)
-			break;
-	}
 	return added;
 }
 
