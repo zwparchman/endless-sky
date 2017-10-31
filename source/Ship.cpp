@@ -41,6 +41,38 @@ namespace {
 	const vector<Angle> BAY_ANGLE = {Angle(0.), Angle(-90.), Angle(90.), Angle(180.)};
 	
 	const double SCAN_TIME = 60.;
+	
+	// Updates the given property (e.g. shields) based on the given needed
+	// amount (i.e. maxValue - current), maximum addable rate, and the
+	// energy cost associated with providing that rate. Scales the rate if
+	// there is insufficient energy to supply the maximum amount.
+	void UpdateProperty(double &energy, double &heat, double &property, double &need,
+			double energyCost, double heatGen, double &maxRate)
+	{
+		if(need <= 0.)
+			return;
+		
+		// Scale by the available energy.
+		if(energy < energyCost)
+		{
+			maxRate *= energy / energyCost;
+			heatGen *= energy / energyCost;
+			energyCost = energy;
+		}
+		// Do not exceed the needed amount.
+		double added = min(need, maxRate);
+		if(added)
+		{
+			// Scale the costs by the amount actually used.
+			energy -= energyCost * (added / maxRate);
+			heat += heatGen * (added / maxRate);
+			property += added;
+			// Update the remaining available amount.
+			maxRate -= added;
+			// Update the needed amount.
+			need -= added;
+		}
+	}
 }
 
 const vector<string> Ship::CATEGORIES = {
@@ -1348,31 +1380,13 @@ void Ship::Move(vector<Visual> &visuals, list<shared_ptr<Flotsam>> &flotsam)
 		}
 	}
 	
-	// Shield and hull recharge. This comes after movement so that engines take
-	// priority over shield recharge.
+	// Shield and hull recharge comes after movement so that engines take
+	// priority over repairs. Each method also attempts to repair carried
+	// ships, via their own repair outfits and this ship's excess amount.
 	if(!isDisabled)
 	{
-		// Recharge is limited by available energy. Extra recharge capacity can
-		// be used on fighters this ship is carrying.
-		double hullRate = attributes.Get("hull repair rate");
-		if(hullRate > 0.)
-		{
-			double hullEnergy = attributes.Get("hull energy");
-			double hullHeat = attributes.Get("hull heat");
-			double hullAdded = AddHull(hullRate * min(1., hullEnergy ? energy / hullEnergy : 1.));
-			energy -= hullEnergy * hullAdded / hullRate;
-			heat += hullHeat * hullAdded / hullRate;
-		}
-		
-		double shieldRate = attributes.Get("shield generation");
-		if(shieldRate > 0.)
-		{
-			double shieldEnergy = attributes.Get("shield energy");
-			double shieldHeat = attributes.Get("shield heat");
-			double shieldsAdded = AddShields(shieldRate * min(1., shieldEnergy ? energy / shieldEnergy : 1.));
-			energy -= shieldEnergy * shieldsAdded / shieldRate;
-			heat += shieldHeat * shieldsAdded / shieldRate;
-		}
+		AddHull(attributes.Get("hull repair rate"));
+		AddShields(attributes.Get("shield generation"));
 	}
 	
 	// Clear your target if it is destroyed. This is only important for NPCs,
@@ -2753,10 +2767,9 @@ double Ship::MinimumHull() const
 
 
 
-// Return an ordered vector of bay indexes that indicates which Bay should
-// receive the ship's excess shield genereation, hull repair, or fuel, to
-// facilitate a parallel repair strategy. The second value is the carried
-// ship's need for the stated Purpose.
+// Return an ordered vector of bay indexes that indicates which Bay should first
+// receive any excess shield generation, hull repair, or fuel. In a parallel
+// repair strategy, fulfill those with the highest needs first.
 vector<pair<size_t, double>> Ship::BayOrder(SortBy reason) const
 {
 	vector<pair<size_t, double>> result;
@@ -2781,7 +2794,7 @@ vector<pair<size_t, double>> Ship::BayOrder(SortBy reason) const
 				result.emplace_back(i,
 					max(0., bays[i].ship->Attributes().Get("fuel capacity") - bays[i].ship->fuel));
 	}
-	// Sort from most need to least need.
+	// Sort from most to least need.
 	if(result.size() > 1)
 		sort(result.begin(), result.end(),
 			[] (const pair<size_t, double> &lhs, const pair<size_t, double> &rhs)
@@ -2794,11 +2807,13 @@ vector<pair<size_t, double>> Ship::BayOrder(SortBy reason) const
 
 
 
-// Add to this ship's hull or shields, and return the amount added. If the
-// ship is carrying fighters, add to them as well.
-double Ship::AddFuel(double rate)
+// Add to this ship's fuel. Preserve 1 jump's worth (to a target system, if
+// possible), and then refuel any fighters that use fuel.
+void Ship::AddFuel(double rate)
 {
-	// Restore this ship's fuel until it has 1 jump's worth.
+	if(rate <= 0.)
+		return;
+	
 	double toReserve = JumpFuel(targetSystem) - fuel;
 	double added = ((toReserve > 0.) ? min(rate, toReserve) : 0.);
 	fuel += added;
@@ -2806,100 +2821,117 @@ double Ship::AddFuel(double rate)
 	
 	if(rate > 0.)
 	{
-		// Obtain the occupied bays, ordered from most to least need,
-		// and their ship's fuel need (max - current).
-		const vector<pair<size_t, double>> order = BayOrder(FUEL);
+		const vector<pair<size_t, double>> order(BayOrder(FUEL));
 		for(const pair<size_t, double> &index : order)
 		{
-			// Carried ships do not collect fuel from ramscoops.
-			double need = index.second;
+			const double &need = index.second;
 			if(rate > 0. && need > 0.)
 			{
 				double extra = min(need, rate);
 				bays[index.first].ship->fuel += extra;
 				rate -= extra;
-				added += extra;
 			}
+			// Carried ships do not utilize their ramscoop power,
+			// so the only recharge amount is from the carrier.
 			else if(rate <= 0.)
 				break;
 		}
-		
-		// All carried ships have reached their fuel capacity: divert
-		// remaining collected fuel into reserves.
+		// Any remaining fuel can be added to this ship.
 		if(rate > 0.)
 		{
 			// Do not exceed this ship's maximum fuel capacity.
 			double extra = min(attributes.Get("fuel capacity") - fuel, rate);
 			fuel += extra;
-			added += extra;
 		}
 	}
-	return added;
 }
 
 
 
 // Increase this ship's hull, and the hull of any ships being carried. Carried
 // ships would otherwise not utilize their natural hull repair.
-double Ship::AddHull(double rate)
+void Ship::AddHull(double rate)
 {
-	double added = min(rate, attributes.Get("hull") - hull);
-	hull += added;
-	rate -= added;
+	double ownEnergyCost = 0.;
+	double ownHeatGen = 0.;
 	
-	// Obtain the occupied bays, ordered from most to least need, and their
-	// ship's hull repair need (max hull - current).
-	vector<pair<size_t, double>> order = BayOrder(HULL);
+	// First apply available hull repair to this ship.
+	if(rate > 0.)
+	{
+		ownEnergyCost = attributes.Get("hull energy");
+		ownHeatGen = attributes.Get("hull heat");
+		double need = attributes.Get("hull") - hull;
+		// Update this ship's hull.
+		UpdateProperty(energy, heat, hull, need, ownEnergyCost, ownHeatGen, rate);
+	}
+	
+	// Apply any native hull repair on carried ships, in addition to excess
+	// generation that was not used by this ship.
+	vector<pair<size_t, double>> order(BayOrder(HULL));
 	for(pair<size_t, double> &index : order)
 	{
 		Bay &bay = bays[index.first];
 		double &need = index.second;
-		// Apply native hull repair of the carried ship.
+		if(need <= 0.)
+			continue;
+		
+		// Activate the native hull repair on the carried ship. This
+		// consumes energy from and produces heat in this ship.
 		double myGen = bay.ship->Attributes().Get("hull repair rate");
-		bay.ship->hull += min(need, myGen);
-		need = max(0., need - myGen);
+		if(myGen > 0.)
+		{
+			double energyCost = bay.ship->Attributes().Get("hull energy");
+			double heatGen = bay.ship->Attributes().Get("hull heat");
+			UpdateProperty(energy, heat, bay.ship->hull, need, energyCost, heatGen, myGen);
+		}
 		// Apply excess repair capacity from this ship.
 		if(rate > 0. && need > 0.)
-		{
-			double extra = min(need, rate);
-			bay.ship->hull += extra;
-			rate -= extra;
-			added += extra;
-		}
+			UpdateProperty(energy, heat, bay.ship->hull, need, ownEnergyCost, ownHeatGen, rate);
 	}
-	return added;
 }
 
 
 
-// Increase this ship's shields, and the shields of any ships being carried.
-// Carried ships would otherwise not utilize their natural shield generation.
-double Ship::AddShields(double rate)
+// Increase this ship's shields, and those of any ships being carried. Carried
+// ships would otherwise not utilize their natural shield regeneration.
+void Ship::AddShields(double rate)
 {
-	double added = min(rate, attributes.Get("shields") - shields);
-	shields += added;
-	rate -= added;
+	double ownEnergyCost = 0.;
+	double ownHeatGen = 0.;
 	
-	// Obtain the occupied bays, ordered from most to least need, and their
-	// ship's shield recharge need (max shields - current).
-	vector<pair<size_t, double>> order = BayOrder(SHIELDS);
+	// First apply available shield generation to this ship.
+	if(rate > 0.)
+	{
+		ownEnergyCost = attributes.Get("shield energy");
+		ownHeatGen = attributes.Get("shield heat");
+		double need = attributes.Get("shields") - shields;
+		// Update this ship's shields.
+		UpdateProperty(energy, heat, shields, need, ownEnergyCost, ownHeatGen, rate);
+	}
+	
+	// Apply any native shield generation on carried ships, in addition to
+	// excess generation that was not used by this ship.
+	vector<pair<size_t, double>> order(BayOrder(SHIELDS));
 	for(pair<size_t, double> &index : order)
 	{
 		Bay &bay = bays[index.first];
 		double &need = index.second;
-		// Apply native shield regeneration of the carried ship.
+		if(need <= 0.)
+			continue;
+		
+		// Activate the native shield generation on the carried ship.
+		// This consumes energy from and produces heat in this ship.
 		double myGen = bay.ship->Attributes().Get("shield generation");
-		bay.ship->shields += min(need, myGen);
-		need = max(0., need - myGen);
-		if(rate > 0. && need > 0.)
+		if(myGen > 0.)
 		{
-			double extra = min(need, rate);
-			bay.ship->shields += extra;
-			rate -= extra;
-			added += extra;
+			double energyCost = bay.ship->Attributes().Get("shield energy");
+			double heatGen = bay.ship->Attributes().Get("shield heat");
+			UpdateProperty(energy, heat, bay.ship->shields, need, energyCost, heatGen, myGen);
 		}
+		// Apply excess shield generation from this ship.
+		if(rate > 0. && need > 0.)
+			UpdateProperty(energy, heat, bay.ship->shields, need, ownEnergyCost, ownHeatGen, rate);
 	}
-	return added;
 }
 
 
